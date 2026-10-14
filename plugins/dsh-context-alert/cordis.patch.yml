@@ -1,0 +1,6 @@
+# dsh-context-alert bundle patch：挂载插件自身
+# 宿主半边（index.js）负责监视 contextPressure 并在回合结束时提醒；
+# 客户端半边（client.js）负责聊天区横幅与设置分区。
+- insert:
+    - id: context-alert
+      name: 'dsh-context-alert'

@@ -1,0 +1,21 @@
+# 依赖
+node_modules/
+
+# 运行时配置（由设置面板与 /ctxalert 写入，不进版本库）
+config.json
+
+# 凭据 —— 永不入库
+token.txt
+*.token
+.env
+
+# 操作系统与编辑器杂物
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+
+# 日志与临时文件
+*.log
+npm-debug.log*

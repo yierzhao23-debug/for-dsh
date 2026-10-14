@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "上下文提醒 (dsh-context-alert)",
+    "description": "读取官方 contextPressure 投影，在会话上下文该换的时候于回合结束主动提醒你开新会话，并在输入框上方显示压力横幅。"
+  }
+}

@@ -1,0 +1,74 @@
+{
+  "name": "dsh-context-alert",
+  "version": "0.1.0",
+  "description": "上下文压力提醒：读取官方 contextPressure 投影，在会话该换的时候于回合结束主动提醒你开新会话。",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "icon": "icon.svg",
+  "files": [
+    "index.js",
+    "watch.js",
+    "client.js",
+    "alert.ps1",
+    "cordis.patch.yml",
+    "locale",
+    "icon.svg",
+    "README.md",
+    "README.en.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek",
+    "harness",
+    "context",
+    "compaction",
+    "alert"
+  ],
+  "license": "MIT",
+  "author": "yierzhao23-debug",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yierzhao23-debug/for-dsh.git",
+    "directory": "plugins/dsh-context-alert"
+  },
+  "homepage": "https://github.com/yierzhao23-debug/for-dsh#readme",
+  "bugs": {
+    "url": "https://github.com/yierzhao23-debug/for-dsh/issues"
+  },
+  "scripts": {
+    "test": "node run-tests.mjs",
+    "verify": "node verify-install.mjs"
+  },
+  "os": [
+    "win32"
+  ],
+  "engines": {
+    "node": ">=22.5"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    },
+    "compatibility": {
+      "dshReleases": {
+        "0.2.0-rc.2": "compatible"
+      }
+    }
+  }
+}

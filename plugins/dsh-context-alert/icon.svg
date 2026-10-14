@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" role="img" aria-label="Context alert">
+  <!-- 上下文占用环：0–78% 琥珀色（该换会话了），78–92% 红色（贴近自动压缩线），
+       其余留白就是自动压缩的保留区。颜色写死是刻意的 —— 图标属于美术资源，
+       不跟随主题令牌。 -->
+  <g transform="rotate(-90 24 24)" fill="none" stroke-linecap="round" stroke-width="6">
+    <circle cx="24" cy="24" r="18" stroke="#9ca3af" stroke-opacity="0.28" />
+    <circle cx="24" cy="24" r="18" stroke="#f5a524" stroke-dasharray="88.216 24.881" />
+    <circle cx="24" cy="24" r="18" stroke="#ef4444" stroke-dasharray="15.834 97.263" stroke-dashoffset="-88.216" />
+  </g>
+</svg>

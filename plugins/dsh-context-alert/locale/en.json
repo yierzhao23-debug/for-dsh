@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Context Alert (dsh-context-alert)",
+    "description": "Reads the official contextPressure projection and reminds you to start a new session at turn end, with a pressure banner above the composer."
+  }
+}
