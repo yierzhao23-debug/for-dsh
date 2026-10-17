@@ -54,17 +54,20 @@ if ($mode -eq 'probe') {
 }
 
 # --- sound ---------------------------------------------------------------
-# Reuse a custom effect from the sibling notify plugin's sound dir when one is
-# there (~/.dsh/notify/sounds/<name>.wav); otherwise fall back to the system
-# exclamation sound. Reading a file if it happens to exist is the whole
-# coupling -- no dependency on that plugin being installed.
+# Look for a custom effect in this plugin's OWN sound directory --
+# <DSH_CTX_ALERT_HOME, default ~/.dsh/context-alert>/sounds/<name>.wav -- and
+# fall back to the system exclamation sound when it is absent. Own directory
+# only: no other plugin's files are ever read, so nothing else has to be
+# installed for sound to work, and moving that plugin cannot break this one.
 if ($mode -in @('sound', 'both')) {
     if (-not $canPlayAudio) {
         Write-Warning "no audio render device (waveOutGetNumDevs=$renderDevices); sound skipped"
     } else {
         $effect = $env:DSH_CTX_ALERT_SOUND
         if (-not $effect) { $effect = 'explode' }
-        $wav = Join-Path $env:USERPROFILE ('.dsh\notify\sounds\' + $effect + '.wav')
+        $alertHome = $env:DSH_CTX_ALERT_HOME
+        if (-not $alertHome) { $alertHome = Join-Path $env:USERPROFILE '.dsh\context-alert' }
+        $wav = Join-Path $alertHome ('sounds\' + $effect + '.wav')
         try {
             if (Test-Path -LiteralPath $wav) {
                 $player = New-Object System.Media.SoundPlayer($wav)

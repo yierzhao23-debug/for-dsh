@@ -289,3 +289,198 @@ test('通知后端抛错时不影响事件链', async () => {
     h.emit('agent/turn-stopping', { agent: { id: 'sess-err', session }, turn: 1 })
   })
 })
+
+// ── 压缩历史接线 ─────────────────────────────────────────────────────────
+// 真实事件形状（取自本机会话日志）。
+const C_START = (turn) => ({ type: 'compaction/start', seq: 1, time: 1000, data: { compactionId: 'a', turn } })
+const C_SUMMARY = (shadowed) => ({ type: 'compaction/summary', seq: 2, time: 1100, data: { compactionId: 'a', shadowedTokenCount: shadowed } })
+const C_END = (turn) => ({ type: 'compaction/end', seq: 3, time: 1200, data: { compactionId: 'a', turn } })
+const C_PRUNE = (shadowed) => ({ type: 'compaction/prune', seq: 4, time: 1300, data: { shadowedTokenCount: shadowed } })
+
+const fired = (h) => h.logs.filter(([, m]) => m.includes('[演练] 本应提醒'))
+
+/**
+ * 显式设定配置再跑。
+ * 配置文件是**跨测试共享**的（同一个 DSH_CTX_ALERT_HOME），前面的用例
+ * 会把 warnPct/mode 落盘，后面的用例就会读到 —— 不显式设定就会随执行顺序飘。
+ */
+async function configure (h, patch) {
+  const route = h.registered.routes.find((r) => r.path === '/api/context-alert/settings')
+  const res = fakeRes()
+  const body = JSON.stringify(patch)
+  await route.handler({ method: 'POST', async * [Symbol.asyncIterator] () { yield Buffer.from(body) } }, res)
+  assert.equal(res.out.code, 200, '配置写入应成功')
+}
+
+/** 让每个用例都从一套确定的阈值出发。 */
+const BASE_CFG = { enabled: true, warnPct: 65, criticalPct: 82, rearmPct: 45, cooldownMs: 0, maxAlertsPerSession: 3, mode: 'toast', criticalMode: 'both' }
+
+test('会话日志里有两次压缩 → 提醒说"第三次"', async () => {
+  const session = {
+    id: 'sess-c',
+    // 关键：方法名是 snapshotEvents，不是 session.events（后者不存在）
+    snapshotEvents: () => [
+      C_PRUNE(2118),
+      C_START(3), C_SUMMARY(74314), C_END(3),
+      C_START(9), C_SUMMARY(78463), C_END(9),
+    ],
+  }
+  const h = makeCtx({ sessions: [session], pressure: { 'sess-c': stateAt(70) } })
+  apply(h.ctx)
+  await configure(h, BASE_CFG)
+  h.emit('agent/inbox/inserted', { agent: { id: 'sess-c', session } })
+  h.emit('session/event', session, { kind: 'x' })
+  h.emit('agent/turn-stopping', { agent: { id: 'sess-c', session }, turn: 12 })
+  await flush()
+
+  const f = fired(h)
+  assert.equal(f.length, 1)
+  assert.match(f[0][1], /第三次自动压缩/, '标题要带序号')
+  assert.match(f[0][1], /累计遮蔽 152,777 tokens/, '要带累计遮蔽量（74314 + 78463）')
+  assert.match(f[0][1], /信息丢失率约 52\.2%/, '152777 / (152777 + 140000)')
+  assert.match(f[0][1], /最近一次（第 9 回合）遮蔽了 78,463 tokens/, '要带实测的遮蔽量')
+  assert.match(f[0][1], /另有 2,118 tokens 的工具输出被修剪/, '修剪单独说')
+})
+
+test('会话没压缩过 → 提醒说"第一次"', async () => {
+  const session = { id: 'sess-d', snapshotEvents: () => [{ type: 'tool/call' }] }
+  const h = makeCtx({ sessions: [session], pressure: { 'sess-d': stateAt(70) } })
+  apply(h.ctx)
+  await configure(h, BASE_CFG)
+  h.emit('agent/inbox/inserted', { agent: { id: 'sess-d', session } })
+  h.emit('session/event', session, { kind: 'x' })
+  h.emit('agent/turn-stopping', { agent: { id: 'sess-d', session }, turn: 1 })
+  await flush()
+  assert.match(fired(h)[0][1], /第一次自动压缩/)
+})
+
+test('读不到会话日志时不谎称"第一次"，并留下告警', async () => {
+  // 没有 snapshotEvents 的会话（或 API 改名）→ 必须退化成不带序数的说法
+  const session = { id: 'sess-e' }
+  const h = makeCtx({ sessions: [session], pressure: { 'sess-e': stateAt(70) } })
+  apply(h.ctx)
+  await configure(h, BASE_CFG)
+  h.emit('agent/inbox/inserted', { agent: { id: 'sess-e', session } })
+  h.emit('session/event', session, { kind: 'x' })
+  h.emit('agent/turn-stopping', { agent: { id: 'sess-e', session }, turn: 1 })
+  await flush()
+
+  const f = fired(h)
+  assert.equal(f.length, 1)
+  assert.doesNotMatch(f[0][1], /第一次/, '不知道就不许说第一次')
+  assert.match(f[0][1], /上下文变重了/)
+  assert.equal(h.logs.filter(([lvl, m]) => lvl === 'warn' && m.includes('读不到会话日志')).length, 1)
+})
+
+test('snapshotEvents 抛错也只是退化，不会让事件链崩掉', async () => {
+  const session = { id: 'sess-f', snapshotEvents: () => { throw new Error('日志被锁') } }
+  const h = makeCtx({ sessions: [session], pressure: { 'sess-f': stateAt(70) } })
+  apply(h.ctx)
+  await configure(h, BASE_CFG)
+  h.emit('agent/inbox/inserted', { agent: { id: 'sess-f', session } })
+  assert.doesNotThrow(() => h.emit('session/event', session, { kind: 'x' }))
+  assert.doesNotThrow(() => h.emit('agent/turn-stopping', { agent: { id: 'sess-f', session }, turn: 1 }))
+  await flush()
+  assert.match(fired(h)[0][1], /上下文变重了/)
+})
+
+test('直播压缩事件也累加次数（不依赖重新读日志）', async () => {
+  // 会话先被扫过一次（0 次压缩），之后现场发生一次压缩 → 下一次提醒要变"第二次"
+  const session = { id: 'sess-g', snapshotEvents: () => [] }
+  const h = makeCtx({ sessions: [session], pressure: { 'sess-g': stateAt(70) } })
+  apply(h.ctx)
+  await configure(h, BASE_CFG)
+  h.emit('agent/inbox/inserted', { agent: { id: 'sess-g', session } })
+  h.emit('session/event', session, { kind: 'x' })
+  h.emit('agent/turn-stopping', { agent: { id: 'sess-g', session }, turn: 1 })
+  await flush()
+  assert.match(fired(h)[0][1], /第一次自动压缩/)
+
+  // 现场压缩一次，然后占用跌回再涨回去，触发第二次提醒
+  h.emit('session/event', session, C_START(2))
+  h.emit('session/event', session, C_SUMMARY(50000))
+  h.emit('session/event', session, C_END(2))
+  h.services.sessionProjections.stateOf = () => stateAt(20)   // 回落到 rearm 以下
+  h.emit('session/event', session, { kind: 'x' })
+  h.services.sessionProjections.stateOf = () => stateAt(75)   // 再涨上来
+  h.emit('session/event', session, { kind: 'x' })
+  h.emit('agent/turn-stopping', { agent: { id: 'sess-g', session }, turn: 3 })
+  await flush()
+
+  const f = fired(h)
+  assert.equal(f.length, 2, '应该有第二次提醒')
+  assert.match(f[1][1], /第二次自动压缩/, '直播压缩事件把次数加上了')
+})
+
+test('state 路由带上横幅要用的序号措辞', async () => {
+  const session = {
+    id: 'sess-h',
+    snapshotEvents: () => [C_START(1), C_SUMMARY(1000), C_END(1)],
+  }
+  const h = makeCtx({ sessions: [session], pressure: { 'sess-h': stateAt(70) } })
+  apply(h.ctx)
+  // 只有用户自己的会话才值得扫日志（子代理不提醒、也不给用户看）
+  h.emit('agent/inbox/inserted', { agent: { id: 'sess-h', session } })
+  const route = h.registered.routes.find((r) => r.path === '/api/context-alert/state')
+  const res = fakeRes()
+  await route.handler({ method: 'GET' }, res)
+  const row = res.out.body.sessions.find((r) => r.id === 'sess-h')
+  assert.equal(row.compactionCount, 1)
+  assert.equal(row.compactionKnown, true)
+  assert.equal(row.ordinalText, '第二次')
+  assert.equal(row.lastShadowedTokens, 1000)
+})
+
+test('子代理会话不扫日志：没有 userDriven 就不付这个成本', async () => {
+  let scanned = 0
+  const session = {
+    id: 'sub-scan',
+    header: { delegationDepth: 2 },   // 子代理
+    snapshotEvents: () => { scanned++; return [C_START(1), C_SUMMARY(1000), C_END(1)] },
+  }
+  const h = makeCtx({ sessions: [session], pressure: { 'sub-scan': stateAt(95) } })
+  apply(h.ctx)
+  const route = h.registered.routes.find((r) => r.path === '/api/context-alert/state')
+  await route.handler({ method: 'GET' }, fakeRes())
+  await route.handler({ method: 'GET' }, fakeRes())
+  assert.equal(scanned, 0, '子代理会话不该被扫日志')
+
+  // 用户在这个会话里发过消息之后才扫，且只扫一次
+  h.emit('agent/inbox/inserted', { agent: { id: 'sub-scan', session } })
+  await route.handler({ method: 'GET' }, fakeRes())
+  await route.handler({ method: 'GET' }, fakeRes())
+  assert.equal(scanned, 1, '每个会话只扫一次')
+})
+
+test('恢复进来的顶层会话也扫日志（否则重启后横幅一直显示兜底文案）', async () => {
+  // 会话是恢复的 → 不会触发 agent/inbox/inserted → userDriven 还是 false。
+  // 但 delegationDepth 为 0，说明这就是用户在用的会话，应当照扫。
+  let scanned = 0
+  const session = {
+    id: 'resumed',
+    header: { delegationDepth: 0 },
+    snapshotEvents: () => { scanned++; return [C_START(1), C_SUMMARY(4242), C_END(1)] },
+  }
+  const h = makeCtx({ sessions: [session], pressure: { 'resumed': stateAt(70) } })
+  apply(h.ctx)
+  const route = h.registered.routes.find((r) => r.path === '/api/context-alert/state')
+  const res = fakeRes()
+  await route.handler({ method: 'GET' }, res)
+  assert.equal(scanned, 1, '顶层会话应被扫描')
+  const row = res.out.body.sessions.find((r) => r.id === 'resumed')
+  assert.equal(row.ordinalText, '第二次', '横幅要能立刻拿到序号')
+  assert.equal(row.userDriven, false, '但没发过消息的会话仍然不会被提醒')
+})
+
+test('没有 header 的会话按顶层处理（宁可多扫一次，也不要序号一直缺着）', async () => {
+  let scanned = 0
+  const session = {
+    id: 'no-header',
+    snapshotEvents: () => { scanned++; return [] },
+  }
+  const h = makeCtx({ sessions: [session], pressure: { 'no-header': stateAt(70) } })
+  apply(h.ctx)
+  const route = h.registered.routes.find((r) => r.path === '/api/context-alert/state')
+  await route.handler({ method: 'GET' }, fakeRes())
+  assert.equal(scanned, 1)
+})

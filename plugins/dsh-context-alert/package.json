@@ -1,6 +1,7 @@
 {
   "name": "dsh-context-alert",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "private": true,
   "description": "上下文压力提醒：读取官方 contextPressure 投影，在会话该换的时候于回合结束主动提醒你开新会话。",
   "type": "module",
   "main": "./index.js",
@@ -18,10 +19,9 @@
     "alert.ps1",
     "cordis.patch.yml",
     "locale",
+    "tools",
     "icon.svg",
-    "README.md",
-    "README.en.md",
-    "LICENSE"
+    "README.md"
   ],
   "keywords": [
     "dsh",
@@ -33,23 +33,6 @@
     "alert"
   ],
   "license": "MIT",
-  "author": "yierzhao23-debug",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/yierzhao23-debug/for-dsh.git",
-    "directory": "plugins/dsh-context-alert"
-  },
-  "homepage": "https://github.com/yierzhao23-debug/for-dsh#readme",
-  "bugs": {
-    "url": "https://github.com/yierzhao23-debug/for-dsh/issues"
-  },
-  "scripts": {
-    "test": "node run-tests.mjs",
-    "verify": "node verify-install.mjs"
-  },
-  "os": [
-    "win32"
-  ],
   "engines": {
     "node": ">=22.5"
   },

@@ -7,7 +7,7 @@
 ![license](https://img.shields.io/badge/license-MIT-blue.svg)
 ![platform](https://img.shields.io/badge/platform-Windows-0078d4.svg)
 ![dsh](https://img.shields.io/badge/dsh-0.2.0--rc.2-4b6bfb.svg)
-![tests](https://img.shields.io/badge/tests-37%20passing-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-75%20passing-brightgreen.svg)
 
 ---
 
@@ -26,11 +26,23 @@
 
 | Fact | Source |
 | --- | --- |
+| **The official `ContextMeter` already shows occupancy**: a ring plus a percentage below the composer, click to open the `contextBreakdown` panel (system / tools / conversation). It renders inside the input bar's dock, **immediately below this plugin's banner**. | `ContextMeter` in `@deepseek-ai/dsh-client-ui-conversation` (source comment: `Composer context-occupancy meter: a ring and percentage below the card fed by the contextPressure projection`) |
+| **But it only answers "how much, right now"**: its source contains no `compact` / `shadow` / `loss` / `notify` / threshold logic — no compaction count, no loss rate, no alerting of any kind. | ibid. (its source region checked item by item) |
 | **DSH does not warn you about context pressure.** It silently auto-compacts once a threshold is hit. | `@deepseek-ai/dsh-compaction-basic` defaults: `thresholdRatio: 0.8`, `retainRatio: 0.16`, `headroomTokens: 65536` |
 | Compaction is **lossy**: old content is folded into a summary and the detail is gone. | ibid. |
 | **`dsh-context` does not alert you.** It is a visualization plugin (insights page, context tab, `/context` command, right-hand Context panel). The only `REMINDER` in its source is a `REMINDER_PREFIX` regex constant unrelated to alerting users; its preferences are all display-only. | `node_modules/dsh-context/lib/index.js` |
 
 In other words: **by default, your context gets compacted without warning.** This plugin fills that gap.
+
+### 1.1 Division of labour with the official `ContextMeter` (why the banner shows no percentage)
+
+| Reading | Owner | Location |
+| --- | --- | --- |
+| Occupancy (percentage), token usage, context composition | **Official `ContextMeter`** | The ring in the input bar's dock; click to expand the panel |
+| How many compactions, how much was shadowed, the information-loss rate | **This plugin's banner** | **Above** the composer (`conversation.input.dock`) |
+| Proactive alerts at end of turn (desktop / speech) | **This plugin** | End of turn, independent of any UI |
+
+The two sit directly on top of each other — the official ring lives in the `InputBar`'s dock, and `conversation.input.dock` renders immediately above the input bar — so **the banner's idle row deliberately does not repeat the percentage or the token usage**. Printing the same number twice, side by side, only makes you wonder which one is right. Only once `warnPct` is crossed, and the percentage has become part of the "time to switch sessions" judgement, does the banner bring it up next to the title.
 
 ---
 
@@ -80,7 +92,7 @@ Alerts are hooked to **end of turn** (`agent/turn-stopping`) — the moment you 
 
 | Surface | Location | Notes |
 | --- | --- | --- |
-| **Pressure banner** | Above the composer (`conversation.input.dock`) | Appears only above `warnPct`, shows percentage and token usage; turns red when critical |
+| **Pressure banner** | Above the composer (`conversation.input.dock`) | Idle: a single small line, `已压缩 2 次　·　信息丢失率 52.2%` (occupancy and token usage belong to the official ring just below — **not repeated**). Above `warnPct` it expands into multiple lines whose headline is "the Nth auto-compaction of this conversation is about to start", followed by percentage, token usage and the last shadowed amount; turns red when critical |
 | **Settings section** | Settings → Plugins → Context alert (`settings.section`) | Thresholds, cooldown, cap, notification mode, plus a "send a test alert" button |
 
 Both surfaces use only `--dsw-alias-*` theme tokens (`state-warn-primary`, `state-error-primary`, `bg-layer-2`, `label-*`), so light and dark themes follow automatically. No hard-coded colors (except the icon, which is an art asset).
@@ -149,7 +161,7 @@ Runtime configuration lives in `%USERPROFILE%\.dsh\context-alert\config.json` (w
 | --- | --- |
 | `DSH_CTX_ALERT_HOME` | Override the config directory (default `~/.dsh/context-alert`) |
 | `DSH_CTX_ALERT_DRYRUN=1` | Dry-run: log only, never pop up. For self-checks and tests |
-| `DSH_CTX_ALERT_SOUND` | Sound name (used by `sound` / `both` modes) |
+| `DSH_CTX_ALERT_SOUND` | Sound name, default `explode` (used by `sound` / `both` modes; drop the file in `~/.dsh/context-alert/sounds/`) |
 
 ---
 
@@ -161,11 +173,13 @@ A dependency-free PowerShell script. The payload travels as a base64 (UTF-8 JSON
 | --- | --- |
 | `toast` | `NotifyIcon` balloon (10 s) |
 | `speak` | Offline SAPI synthesis, preferring a `zh*` voice; falls back to the COM `SAPI.SpVoice` interface if `System.Speech` fails |
-| `sound` | Uses `~/.dsh/notify/sounds/<name>.wav` when present, otherwise the system sound |
+| `sound` | Uses `~/.dsh/context-alert/sounds/<name>.wav` when present (root overridable via `DSH_CTX_ALERT_HOME`), otherwise the system sound |
 | `both` | Speech + desktop |
 | `probe` | Reports only the number of audio output devices; used for the startup self-check |
 
 The script first calls `waveOutGetNumDevs()`. **With no output device it never attempts SAPI** (SAPI would otherwise throw a deeply misleading "no voice installed, or no voice available for the current security settings"); instead it states plainly that there is no audio device and alerts will appear as desktop balloons.
+
+The script reads **its own** directory only: drop `<name>.wav` into `~/.dsh/context-alert/sounds/` to customise the sound (the default name is `explode`, overridable via `DSH_CTX_ALERT_SOUND`). It **never reads another plugin's files** — so nothing else has to be installed first, and moving or uninstalling another plugin cannot affect this one.
 
 The script itself is **pure ASCII**: Windows PowerShell 5.1 decodes a BOM-less `.ps1` using the system ANSI code page, so non-ASCII source text would be garbled. All user-facing text arrives through the base64 payload.
 
@@ -177,6 +191,10 @@ The **notification delivery** part of this plugin follows the proven approach of
 
 The two have different jobs. `dsh-plugin-notify` answers "**how does a message reach your eyes**" (desktop toast / speech / sound, covering turn end, approvals and questions). This plugin answers "**given that context is filling up, when should that be said, how often, and how do we avoid being annoying**" (reads the `contextPressure` projection + a threshold hysteresis state machine + end-of-turn triggering).
 
+There is **no runtime coupling** between them: this plugin's source imports nothing from `dsh-plugin-notify`, and its sound file now lives in its own directory (`~/.dsh/context-alert/sounds/`) rather than that plugin's. Uninstalling `dsh-plugin-notify` cannot affect this one.
+
+The closest neighbour is actually official rather than third-party: the **`ContextMeter`** shipped in `@deepseek-ai/dsh-client-ui-conversation`, which renders a context-occupancy ring in the input bar's dock, directly below this plugin's banner. It answers "how much context is in use right now"; this plugin deliberately does **not** repeat that reading and answers the questions the ring cannot — how many compactions have happened, how much was shadowed, what the information-loss rate is, and whether it is time to switch sessions. See §1.1.
+
 > If you know of another plugin that proactively alerts on context pressure, please open an issue and this section will be updated.
 
 ---
@@ -187,7 +205,7 @@ The two have different jobs. `dsh-plugin-notify` answers "**how does a message r
 
 - `watch.js` pure logic: occupancy formula, hysteresis, cooldown, escalation bypassing cooldown, per-session cap, re-arm after compaction, and never inventing a number from missing fields.
 - `index.js` host half: runs the real `apply()` against a fake ctx, covering hook registration, pressure feeding, `userDriven` filtering, end-of-turn triggering, `session/disposed` cleanup, every command branch, the three HTTP routes, and graceful degradation when `sessionProjections` is absent.
-- Full suite: **37 passed, 0 failed** (Node 24.21.0, `node run-tests.mjs`).
+- Full suite: **75 passed, 0 failed** (Node 24.21.0, `node run-tests.mjs`).
 - `alert.ps1`: `toast` (the balloon really appears), `probe`, and a clean error exit on a missing payload, all exercised on the author's machine.
 - Every JS file passes `node --check`; the three JSON files validate; `alert.ps1` passes the pure-ASCII check.
 

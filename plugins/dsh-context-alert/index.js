@@ -19,7 +19,20 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { DEFAULTS, alertMessage, alertTitle, createWatcher, occupancyOf } from './watch.js'
+import {
+  DEFAULTS,
+  alertMessage,
+  alertTitle,
+  compactionHistory,
+  createWatcher,
+  emptyCompaction,
+  fmtTokens,
+  foldCompaction,
+  lossIsMeaningful,
+  lossRatePct,
+  occupancyOf,
+  ordinalPhrase,
+} from './watch.js'
 
 export const name = 'dsh-context-alert'
 
@@ -163,7 +176,38 @@ export function apply (ctx) {
   const watcher = createWatcher(config)
   // 由 ctx.inject 句柄填上；collect() 用它实时盘点，不依赖根 ctx 的服务可见性。
   const services = { projections: null, sessions: null }
+  // 每个会话的压缩历史（增量），以及"是否已做过全量读日志"。
+  const compactionOf = new Map()
+  const scannedCompaction = new Set()
   let audioReported = false
+
+  /**
+   * 一次性读该会话的完整日志，算出压缩历史。
+   *
+   * 注意 API：Session 上**没有** `events` 属性（官方 practices 文档里
+   * "rescanning session.events" 是宽泛说法）。真实方法是 snapshotEvents()。
+   * 按 `session.events` 写会拿到 undefined，然后永远报告"0 次压缩"——
+   * 一个不报错、只是长期说错的静默 bug。
+   *
+   * 读不到时把 known 置 false：文案退化成不带序数的说法，
+   * 而不是硬说"第一次"。
+   */
+  function ensureCompaction (id, session) {
+    if (scannedCompaction.has(id)) return compactionOf.get(id) ?? null
+    scannedCompaction.add(id)
+
+    let info
+    try {
+      if (typeof session?.snapshotEvents !== 'function') throw new Error('session.snapshotEvents 不可用')
+      info = compactionHistory(session.snapshotEvents())
+    } catch (e) {
+      info = emptyCompaction()
+      warn(`读不到会话日志，无法判断这是第几次压缩（文案将不带次数）：${e.message}`)
+    }
+    compactionOf.set(id, info)
+    watcher.setCompaction(id, info)
+    return info
+  }
 
   /** 送出一条提醒。通知失败绝不能让会话事件处理链崩掉。 */
   async function fire (alert, reason = 'auto') {
@@ -173,7 +217,7 @@ export function apply (ctx) {
     try {
       const out = await runScript({ mode, title, message })
       if (out.stderr) warn(`通知后端有告警：${out.stderr.split('\n')[0]}`)
-      if (out.dryRun) log(`[演练] 本应提醒（${reason}/${alert.level}/${alert.pct}%/${mode}）：${message}`)
+      if (out.dryRun) log(`[演练] 本应提醒（${reason}/${alert.level}/${alert.pct}%/${mode}）：${title} —— ${message}`)
       else log(`已提醒（${reason}/${alert.level}/${alert.pct}%/${mode}）：${out.stdout || 'ok'}`)
       return { ok: true, mode, message, dryRun: out.dryRun === true }
     } catch (e) {
@@ -220,9 +264,16 @@ export function apply (ctx) {
     }
 
     // 会话每提交一个事件就更新一次压力。纯算术，开销可忽略。
-    const offEvent = ctx.on('session/event', (session) => {
+    // 顺带把压缩事件折进历史：压缩次数决定了文案里的"第几次"。
+    const offEvent = ctx.on('session/event', (session, event) => {
       const id = idOf(session)
       if (id === null) return
+      if (typeof event?.type === 'string' && event.type.startsWith('compaction/')) {
+        const info = foldCompaction(compactionOf.get(id) ?? emptyCompaction(), event)
+        compactionOf.set(id, info)
+        // 未扫描过的会话也先记着；真到要提醒时会做一次全量读日志并覆盖（不会重复计数）。
+        watcher.setCompaction(id, info)
+      }
       const state = readPressure(session)
       if (state !== null) watcher.observe(id, state)
     })
@@ -238,15 +289,23 @@ export function apply (ctx) {
       const agent = payload?.agent
       const id = idOf(agent)
       if (id === null) return
-      const state = readPressure(agent.session)
+      const session = agent.session
+      const state = readPressure(session)
       if (state !== null) watcher.observe(id, state)
+      // 只有真要提醒时才去读一次完整日志（O(n)，一次性），平时不付这个成本。
+      const rec = watcher.snapshot().find((r) => r.id === id)
+      if (rec !== undefined && rec.pending !== 'ok') ensureCompaction(id, session)
       const alert = watcher.takeAlert(id)
       if (alert !== null) void fire(alert)
     })
 
     const offGone = ctx.on('session/disposed', (session) => {
       const id = idOf(session)
-      if (id !== null) watcher.forget(id)
+      if (id !== null) {
+        watcher.forget(id)
+        compactionOf.delete(id)
+        scannedCompaction.delete(id)
+      }
     })
 
     log(`已开始监视上下文压力（warn ${watcher.config.warnPct}% / critical ${watcher.config.criticalPct}%）。`)
@@ -273,14 +332,44 @@ export function apply (ctx) {
       try { state = projections?.stateOf?.(session, 'contextPressure') ?? null } catch { state = null }
       const occ = occupancyOf(state)
       const rec = watcher.snapshot().find((r) => r.id === id)
+      // 横幅也要显示"第几次压缩"，所以这里补一次扫描。
+      //
+      // 为什么要看 delegationDepth 而不是只看 userDriven：会话是**恢复**进来的，
+      // 恢复时不会触发 agent/inbox/inserted，于是重启后用户还没发消息的那段时间里
+      // userDriven 是 false —— 只认 userDriven 的话，横幅会一直显示兜底文案，
+      // 看起来像没修好。顶层会话（delegationDepth 0）本身就是用户在用的，
+      // 扫它的日志合理；子代理会话（depth > 0）既不会提醒也不给用户看，跳过。
+      const depth = session?.header?.delegationDepth
+      const topLevel = typeof depth !== 'number' || depth === 0
+      if (rec?.userDriven === true || topLevel) ensureCompaction(id, session)
+      // 必须在 ensureCompaction 之后读，否则拿到的是扫描前的空值。
+      const comp = compactionOf.get(id)
+      const known = comp?.known ?? rec?.compactionKnown ?? false
+      const shadowedTotal = comp?.shadowedTotal ?? rec?.shadowedTotal ?? 0
+      const used = occ?.used ?? rec?.used ?? null
       rows.push({
         id,
         userDriven: rec?.userDriven ?? false,
         pct: occ?.pct ?? rec?.pct ?? null,
-        used: occ?.used ?? rec?.used ?? null,
+        used,
         window: occ?.window ?? rec?.window ?? null,
         pending: rec?.pending ?? 'ok',
         notifyCount: rec?.notifyCount ?? 0,
+        compactionCount: comp?.count ?? rec?.compactionCount ?? 0,
+        compactionKnown: known,
+        shadowedTotal,
+        prunedTotal: comp?.prunedTotal ?? rec?.prunedTotal ?? 0,
+        lastShadowedTokens: comp?.lastShadowedTokens ?? rec?.lastShadowedTokens ?? null,
+        lastTurn: comp?.lastTurn ?? rec?.lastTurn ?? null,
+        // 丢失率由宿主算好交给客户端，公式与"能不能展示"的判据都只在 watch.js。
+        // 压过但遮蔽数据缺失时给 null（客户端就不显示），避免"遮蔽了 7 万却说 0%"。
+        lossPct: known && lossIsMeaningful(comp?.count ?? rec?.compactionCount ?? 0, shadowedTotal)
+          ? lossRatePct(shadowedTotal, used)
+          : null,
+        // 序号措辞由 watch.js 统一生成，客户端只负责显示，不自己拼中文。
+        ordinalText: known
+          ? ordinalPhrase(comp?.count ?? rec?.compactionCount ?? 0)
+          : null,
       })
     }
     // 已观测到但已不在 live 列表里的（理论上很少）也带上，便于排查。
@@ -294,6 +383,16 @@ export function apply (ctx) {
         window: rec.window,
         pending: rec.pending,
         notifyCount: rec.notifyCount,
+        compactionCount: rec.compactionCount,
+        compactionKnown: rec.compactionKnown,
+        shadowedTotal: rec.shadowedTotal ?? 0,
+        prunedTotal: rec.prunedTotal ?? 0,
+        lastShadowedTokens: rec.lastShadowedTokens,
+        lastTurn: rec.lastTurn,
+        lossPct: rec.compactionKnown && lossIsMeaningful(rec.compactionCount, rec.shadowedTotal ?? 0)
+          ? lossRatePct(rec.shadowedTotal, rec.used)
+          : null,
+        ordinalText: rec.compactionKnown ? ordinalPhrase(rec.compactionCount) : null,
         stale: true,
       })
     }
@@ -321,7 +420,15 @@ export function apply (ctx) {
             const tag = r.userDriven ? '' : '（非用户会话，不提醒）'
             const armed = r.pending === 'ok' ? '' : ` 待发:${r.pending}`
             const stale = r.stale ? '（已结束）' : ''
-            return `  ${String(r.pct).padStart(5)}%  ${r.used}/${r.window}  ${r.id.slice(0, 8)}${stale}${tag}${armed}  已提醒${r.notifyCount}次`
+            const comp = r.compactionKnown
+              ? (r.compactionCount === 0
+                  ? '  未压缩过'
+                  : `  已压缩${r.compactionCount}次`
+                    + `/累计遮蔽${fmtTokens(r.shadowedTotal)}`
+                    + (r.lossPct === null ? '' : `/丢失率${r.lossPct}%`)
+                    + (r.prunedTotal > 0 ? `/修剪${fmtTokens(r.prunedTotal)}` : ''))
+              : '  压缩历史未知'
+            return `  ${String(r.pct).padStart(5)}%  ${r.used}/${r.window}  ${r.id.slice(0, 8)}${stale}${tag}${armed}  已提醒${r.notifyCount}次${comp}`
           })
         return { kind: 'success', text: `${head}\n${lines.join('\n')}` }
       }
@@ -346,6 +453,13 @@ export function apply (ctx) {
           pct: sample.pct ?? (level === 'critical' ? 88 : 70),
           used: sample.used ?? 0,
           window: sample.window ?? 0,
+          // 有真实会话就借用它的压缩历史，这样测试文案和真提醒长得一样。
+          compactionCount: sample.compactionCount ?? 0,
+          compactionKnown: sample.compactionKnown ?? true,
+          lastShadowedTokens: sample.lastShadowedTokens ?? null,
+          lastTurn: sample.lastTurn ?? null,
+          compactPct: watcher.config.compactPct,
+          headroomTokens: watcher.config.headroomTokens,
         }
         const res = await fire(fake, 'test')
         return res.ok

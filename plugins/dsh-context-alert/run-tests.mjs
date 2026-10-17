@@ -3,3 +3,4 @@
 // node:test 在当前进程内执行并把 TAP 打到 stdout。
 import './test/watch.test.mjs'
 import './test/host.test.mjs'
+import './test/client.test.mjs'
