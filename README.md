@@ -1,6 +1,6 @@
 # for-DSH
 
-> 我的 **DeepSeek Harness（DSH）** 插件与工具集合。
+> 个人 **DeepSeek Harness（DSH）** 插件与工具集合。
 
 **中文** | [English](#english)
 
