@@ -230,7 +230,7 @@ const SUMMARY = (shadowed) => ({ type: 'compaction/summary', seq: 2, time: 1100,
 const END = (turn) => ({ type: 'compaction/end', seq: 3, time: 1200, data: { compactionId: 'a', turn } })
 const PRUNE = (shadowed) => ({ type: 'compaction/prune', seq: 4, time: 1300, data: { shadowedRange: { start: 21, end: 21 }, shadowedSeqs: [21], shadowedTokenCount: shadowed } })
 
-test('compactionHistory 数 compaction/start，不是数 prune', () => {
+test('compactionHistory 数成功完成的压缩（end 结算），不是数 prune', () => {
   // 真实日志里 prune 的数量和压缩次数完全不成比例（实测 4 个 prune 对 2 次压缩，
   // 12 个 prune 对 1 次压缩），把 prune 算进去就会数多。
   const info = compactionHistory([
@@ -239,9 +239,44 @@ test('compactionHistory 数 compaction/start，不是数 prune', () => {
     START(9), SUMMARY(78463), END(9),
   ])
   assert.equal(info.count, 2)
+  assert.equal(info.failedCount, 0)
   assert.equal(info.lastShadowedTokens, 78463)
   assert.equal(info.lastTurn, 9)
   assert.equal(info.lastEndTime, 1200)
+})
+
+test('压缩失败（end 带 error、无 summary）不算成功，单独记 failedCount', () => {
+  // dsh-compaction-basic 的失败路径：start → end{ error }，且**不发 summary**。
+  // 在 start 上就 +1 的写法会把它当成"成功压过一次"，让"第 N 次"整体虚高。
+  const info = compactionHistory([
+    START(3), SUMMARY(74314), END(3),
+    { type: 'compaction/start', seq: 4, time: 1400, data: { compactionId: 'b', turn: 5 } },
+    { type: 'compaction/end', seq: 5, time: 1500, data: { compactionId: 'b', turn: 5, error: { name: 'Error', message: 'boom' } } },
+  ])
+  assert.equal(info.count, 1, '只有一次成功')
+  assert.equal(info.failedCount, 1, '失败单独计数')
+  assert.equal(info.known, true, '有失败不等于事件名漂移')
+  assert.equal(info.lastShadowedTokens, 74314, '失败那次没有 summary，不能动遮蔽量')
+})
+
+test('压缩进行中（有 start、end 还没写）不提前计数，也不降级', () => {
+  const info = compactionHistory([
+    START(3), SUMMARY(74314), END(3),
+    START(7), SUMMARY(50000),
+  ])
+  assert.equal(info.count, 1, '正在压的那次还没结束，不能算进去')
+  assert.equal(info.known, true, 'summary 有配对的 start，不算漂移')
+  assert.equal(info.shadowedTotal, 124314, '已写入的 summary 仍计入累计遮蔽')
+})
+
+test('只有失败的压缩时 count=0，但 known 仍为 true（那不是漂移）', () => {
+  const info = compactionHistory([
+    { type: 'compaction/start', seq: 1, time: 1, data: { compactionId: 'a', turn: 2 } },
+    { type: 'compaction/end', seq: 2, time: 2, data: { compactionId: 'a', turn: 2, error: 'x' } },
+  ])
+  assert.equal(info.count, 0)
+  assert.equal(info.failedCount, 1)
+  assert.equal(info.known, true)
 })
 
 test('compactionHistory 没有压缩事件时是 0，且 known 为 true', () => {
@@ -279,12 +314,15 @@ test('foldCompaction 非就地，不改动传入的历史', () => {
   const before = emptyCompaction()
   const after = foldCompaction(before, START(1))
   assert.equal(before.count, 0)
-  assert.equal(after.count, 1)
+  assert.equal(before.pending, false, 'start 不能动传入对象的 pending')
+  assert.equal(after.pending, true, 'start 只标记"进行中"')
+  assert.equal(after.count, 0, 'start 本身不计数，等 end 结算')
 })
 
 test('foldCompaction 对垃圾输入不炸，也不编造', () => {
   assert.equal(foldCompaction(null, null).count, 0)
-  assert.equal(foldCompaction(undefined, { type: 'compaction/start' }).count, 1)
+  assert.equal(foldCompaction(undefined, { type: 'compaction/start' }).count, 0)
+  assert.equal(foldCompaction(undefined, { type: 'compaction/start' }).pending, true)
   assert.equal(foldCompaction(emptyCompaction(), { type: 'compaction/start', data: { turn: 'x' } }).lastTurn, null)
   assert.equal(foldCompaction(emptyCompaction(), { type: 'compaction/summary', data: {} }).lastShadowedTokens, null)
 })

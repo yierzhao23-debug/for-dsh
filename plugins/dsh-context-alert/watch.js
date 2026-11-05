@@ -110,6 +110,12 @@ function levelFor(pct, cfg) {
 export function emptyCompaction() {
   return {
     count: 0,
+    /** 尝试过但**失败**的压缩次数（start 了、end 带 error、没有 summary） */
+    failedCount: 0,
+    /** 有一次压缩已经开始但还没结束——计数要等 end，不能提前算 */
+    pending: false,
+    /** 见过 summary/end 却没有配对的 start：事件名漂移或日志被截断，计数不可信 */
+    orphan: false,
     /** 累计被压缩遮蔽掉的原始 token 数（只统计 compaction，不含 prune） */
     shadowedTotal: 0,
     /** 累计被工具结果修剪掉的 token 数（机制不同，单独记） */
@@ -132,10 +138,18 @@ export function foldCompaction(info, event) {
   const data = event.data !== null && typeof event.data === 'object' ? event.data : {}
 
   if (event.type === 'compaction/start') {
-    out.count += 1
+    // 只记"有一次压缩正在进行"，**先不计数**。
+    //
+    // 依据 dsh-compaction-basic（0.2.2-rc.1）的实现：start 与 end 必然成对，
+    // 但**失败时 end 会带 `error` 字段、并且不会发 summary**。如果在这里就 +1，
+    // 一次失败的压缩会被当成"成功压过一次"，让"第 N 次"整体虚高 ——
+    // 而失败恰恰是用户最需要知道的（上下文没被压下去，还会继续涨）。
+    out.pending = true
     const turn = num(data.turn)
     if (turn !== null) out.lastTurn = turn
   } else if (event.type === 'compaction/summary') {
+    // 有 summary 就说明摘要真的生成出来了 —— 这是"成功"的强证据。
+    if (out.pending !== true) out.orphan = true
     const shadowed = num(data.shadowedTokenCount)
     if (shadowed !== null) {
       out.lastShadowedTokens = shadowed
@@ -146,6 +160,16 @@ export function foldCompaction(info, event) {
     if (turn !== null) out.lastTurn = turn
     const time = num(event.time)
     if (time !== null) out.lastEndTime = time
+    if (out.pending !== true) {
+      // 没有配对的 start：事件名漂移，或者日志被截断。两种情况下这个次数
+      // 都不可信 —— 宁可降级成"次数未知"，也不报一个错的。
+      out.orphan = true
+    } else if (data.error !== undefined && data.error !== null) {
+      out.failedCount = (num(out.failedCount) ?? 0) + 1
+    } else {
+      out.count += 1
+    }
+    out.pending = false
   } else if (event.type === 'compaction/prune') {
     // 工具结果修剪也是信息丢失，但机制不同（只动工具结果，重跑一次就能拿回来），
     // 所以单独累计，不混进"压缩次数"，也不混进下面的丢失率。
@@ -158,18 +182,14 @@ export function foldCompaction(info, event) {
 /** 从一段完整事件流里算出压缩历史（一次性读日志时用）。 */
 export function compactionHistory(events) {
   let info = emptyCompaction()
-  let sawSummary = false
-  for (const event of events ?? []) {
-    info = foldCompaction(info, event)
-    if (event !== null && typeof event === 'object') {
-      if (event.type === 'compaction/summary' || event.type === 'compaction/end') sawSummary = true
-    }
-  }
+  for (const event of events ?? []) info = foldCompaction(info, event)
   // 自检：summary/end 永远和 start 成对出现。只看到 summary/end 却没有 start，
-  // 说明 DSH 换了事件名 —— 此时 count=0 是**假的**，宁可不报次数，
+  // 说明 DSH 换了事件名（或日志被截断）—— 此时 count 是**假的**，宁可不报次数，
   // 也不能对着已经压过三次的会话说"第一次"。
-  if (info.count === 0 && sawSummary) info.known = false
-  else info.known = true
+  //
+  // 注意这里**不再**用"count===0 且见过 summary"当判据：一次压缩正在进行时
+  // （start 有了、summary 有了、end 还没写）count 本来就是 0，那不该降级。
+  info.known = info.orphan !== true
   return info
 }
 
@@ -273,6 +293,7 @@ export function createWatcher(config = {}) {
         lastNotifyAt: 0,
         userDriven: false,
         compactionCount: 0,
+        compactionFailed: 0,
         compactionKnown: false,
         shadowedTotal: 0,
         prunedTotal: 0,
@@ -328,6 +349,7 @@ export function createWatcher(config = {}) {
     const r = rec(id)
     const src = info ?? emptyCompaction()
     r.compactionCount = num(src.count) ?? 0
+    r.compactionFailed = num(src.failedCount) ?? 0
     r.compactionKnown = src.known === true
     r.shadowedTotal = num(src.shadowedTotal) ?? 0
     r.prunedTotal = num(src.prunedTotal) ?? 0
@@ -367,6 +389,7 @@ export function createWatcher(config = {}) {
       window: r.window,
       count: r.notifyCount,
       compactionCount: r.compactionCount,
+      failedCount: r.compactionFailed,
       compactionKnown: r.compactionKnown,
       shadowedTotal: r.shadowedTotal,
       prunedTotal: r.prunedTotal,
@@ -455,10 +478,20 @@ export function alertMessage(alert) {
       out.push(`另有 ${fmtTokens(pruned)} tokens 的工具输出被修剪掉（这部分重跑一次通常能拿回来）。`)
     }
   } else if (known && count === 0) {
-    out.push('本对话还没有压缩过，信息都还在。')
+    const failedSoFar = num(alert.failedCount) ?? 0
+    out.push(failedSoFar > 0
+      ? `本对话的 ${failedSoFar} 次压缩都没成功，信息还都在。`
+      : '本对话还没有压缩过，信息都还在。')
   } else {
     // 历史不可知：连"压过几次"都不能说，否则会和标题里不带序数的说法自相矛盾。
     out.push('压缩会把最旧的对话换成一条摘要消息，原始细节之后找不回来。')
+  }
+
+  // 压缩失败 = "上下文没被压下去"的直接证据。官方界面完全不体现这一点，
+  // 而它意味着占用会继续涨、下一次越过阈值时还会再试一遍。
+  const failed = num(alert.failedCount)
+  if (known && count !== null && count > 0 && failed !== null && failed > 0) {
+    out.push(`另有 ${failed} 次压缩失败（摘要没生成出来，那几次压缩没有生效）。`)
   }
 
   const line = compactLine(alert)

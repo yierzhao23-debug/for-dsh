@@ -6,8 +6,8 @@
 
 ![license](https://img.shields.io/badge/license-MIT-blue.svg)
 ![platform](https://img.shields.io/badge/platform-Windows-0078d4.svg)
-![dsh](https://img.shields.io/badge/dsh-0.2.0--rc.2-4b6bfb.svg)
-![tests](https://img.shields.io/badge/tests-75%20passing-brightgreen.svg)
+![dsh](https://img.shields.io/badge/dsh-0.2.2--rc.1-4b6bfb.svg)
+![tests](https://img.shields.io/badge/tests-81%20passing-brightgreen.svg)
 
 ---
 
@@ -16,7 +16,7 @@
 | Item | Requirement |
 | --- | --- |
 | OS | **Windows only** — the notification backend is PowerShell (`NotifyIcon` balloon + SAPI speech) |
-| DSH | `0.2.0-rc.2` (declared in `dsh.compatibility.dshReleases`) |
+| DSH | `0.2.2-rc.1` (declared in `dsh.compatibility.dshReleases`; `0.2.0-rc.2` also declared compatible) |
 | Node | `>= 22.5` |
 | Peer plugin | **Requires `dsh-token-meter`**, which registers the `contextPressure` projection. Without it the plugin still loads and says so explicitly instead of crashing |
 
@@ -69,6 +69,20 @@ On the client side `useProjection('contextPressure')` already yields the compute
 
 Every field is optional: when the window or usage is unavailable the answer is `null` — **better to say nothing than to invent a percentage**.
 
+### How the compaction count is derived
+
+Compaction history is read from the session log (`session.v4.jsonl.zstd`), not estimated. One compaction is a `compaction/start` + `compaction/end` pair, and **the count settles on `end`**:
+
+| Observed | Verdict |
+| --- | --- |
+| `start` → `summary` → `end` (no `error`) | success, `count + 1` |
+| `start` → `end` carrying `error`, no `summary` | **failed**, `failedCount + 1`, `count` unchanged |
+| `start` seen, `end` not written yet | **in flight**, neither counter moves |
+| `summary`/`end` with no matching `start` | event-name drift or truncated log → degrade, report no ordinal |
+| `compaction/prune` | tool-result pruning, **not** a compaction — excluded |
+
+The failure path is documented in `dsh-compaction-basic` (0.2.2-rc.1): a failed close appends `compaction/end` with an `error` field and never appends `compaction/summary`. Counting on `start` would therefore treat a failed compaction as a successful one and inflate the ordinal. A failure matters because **that compaction did not take effect — the context was not pushed down and keeps growing**, which the official UI does not surface at all. When `failedCount > 0` the banner switches its dot to the warning colour and adds `压缩失败 N 次`, the alert body says so explicitly, and `/ctxalert status` reports it.
+
 ---
 
 ## 3. When it fires, and why it is not annoying
@@ -92,7 +106,7 @@ Alerts are hooked to **end of turn** (`agent/turn-stopping`) — the moment you 
 
 | Surface | Location | Notes |
 | --- | --- | --- |
-| **Pressure banner** | Above the composer (`conversation.input.dock`) | Idle: a single small line, `已压缩 2 次　·　信息丢失率 52.2%` (occupancy and token usage belong to the official ring just below — **not repeated**). Above `warnPct` it expands into multiple lines whose headline is "the Nth auto-compaction of this conversation is about to start", followed by percentage, token usage and the last shadowed amount; turns red when critical |
+| **Pressure banner** | Above the composer (`conversation.input.dock`) | Idle: a single small line, `已压缩 2 次　·　信息丢失率 52.2%` (occupancy and token usage belong to the official ring just below — **not repeated**); with failed compactions it adds `压缩失败 N 次` and switches the dot to the warning colour even when occupancy is low. Above `warnPct` it expands into multiple lines whose headline is "the Nth auto-compaction of this conversation is about to start", followed by percentage, token usage and the last shadowed amount; turns red when critical |
 | **Settings section** | Settings → Plugins → Context alert (`settings.section`) | Thresholds, cooldown, cap, notification mode, plus a "send a test alert" button |
 
 Both surfaces use only `--dsw-alias-*` theme tokens (`state-warn-primary`, `state-error-primary`, `bg-layer-2`, `label-*`), so light and dark themes follow automatically. No hard-coded colors (except the icon, which is an art asset).
@@ -203,9 +217,9 @@ The closest neighbour is actually official rather than third-party: the **`Conte
 
 **Verified**
 
-- `watch.js` pure logic: occupancy formula, hysteresis, cooldown, escalation bypassing cooldown, per-session cap, re-arm after compaction, and never inventing a number from missing fields.
+- `watch.js` pure logic: occupancy formula, hysteresis, cooldown, escalation bypassing cooldown, per-session cap, re-arm after compaction, never inventing a number from missing fields, and the compaction history (success settles on `end` rather than on `start`, failures counted separately as `failedCount`, in-flight compactions not counted early, `prune` excluded, degradation on event-name drift, ordinal wording).
 - `index.js` host half: runs the real `apply()` against a fake ctx, covering hook registration, pressure feeding, `userDriven` filtering, end-of-turn triggering, `session/disposed` cleanup, every command branch, the three HTTP routes, and graceful degradation when `sessionProjections` is absent.
-- Full suite: **75 passed, 0 failed** (Node 24.21.0, `node run-tests.mjs`).
+- Full suite: **81 passed, 0 failed** (Node 24.21.0, `node run-tests.mjs`).
 - `alert.ps1`: `toast` (the balloon really appears), `probe`, and a clean error exit on a missing payload, all exercised on the author's machine.
 - Every JS file passes `node --check`; the three JSON files validate; `alert.ps1` passes the pure-ASCII check.
 

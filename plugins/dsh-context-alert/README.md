@@ -64,15 +64,17 @@ occupancy       = projectedTokens / contextWindow
 ```
 
 这个次数**不是估计**，是数出来的：DSH 每次压缩都会往会话日志写一组事件，
-数 `compaction/start` 的个数就是已经压过的次数，+1 就是"即将发生的这次是第几次"。
+一次压缩 = 一对 `compaction/start` + `compaction/end`。**计数在 `end` 上结算**，
++1 就是"即将发生的这次是第几次"。
 
-事件形状（实测自本机 `~/.dsh/sessions/**/session.v4.jsonl.zstd`）：
+事件形状（实测自本机 `~/.dsh/sessions/**/session.v4.jsonl.zstd`，
+并对照 `dsh-compaction-basic` 0.2.2-rc.1 的源码逐项确认）：
 
 | 事件 | 关键字段 | 用途 |
 | --- | --- | --- |
-| `compaction/start` | `compactionId`, `turn` | **计数的唯一依据** |
-| `compaction/summary` | `shadowedTokenCount`, `shadowedRange`, `usage`, `provider`, `model` | 文案里的"上次遮蔽了 N tokens"；`shadowedTokenCount` **累加**得到信息丢失率的分子 |
-| `compaction/end` | `compactionId`, `turn` | 回合号与结束时间 |
+| `compaction/start` | `compactionId`, `turn` | 标记"有一次压缩正在进行"，**本身不计数** |
+| `compaction/summary` | `shadowedTokenCount`, `shadowedRange`, `usage`, `provider`, `model` | 摘要真的生成出来了（成功的强证据）；`shadowedTokenCount` **累加**得到信息丢失率的分子 |
+| `compaction/end` | `compactionId`, `turn`，**失败时多一个 `error`** | **计数的结算点**：没有 `error` → 成功 +1；有 `error` → 记入"压缩失败"（见 §3.3） |
 | `compaction/prune` | `shadowedTokenCount` | **不是压缩**，只是工具结果修剪，必须排除（单独累计，见 §8 丢失率口径） |
 
 > `compaction/prune` 的数量与压缩次数完全不成比例（实测：4 个 prune 对 2 次压缩，
@@ -119,6 +121,30 @@ floor(min(W × thresholdRatio, W − O − headroomTokens))
 ```
 
 可以用 `tools/scan-compactions.mjs` 自己核对（见 §11）。
+
+### 3.3 压缩失败也要说（对齐 0.2.2-rc.1）
+
+`dsh-compaction-basic` 的失败路径是：写 `compaction/start`，摘要生成失败后再写一个
+**带 `error` 字段的 `compaction/end`，但不写 `compaction/summary`**。
+（源码注释原话：*a failed close deliberately leaves the unmatched start detectable*。）
+
+所以"在 `start` 上 +1"这种写法会把**失败的压缩也当成成功的一次**，让"第 N 次"虚高。
+现在的规则是：
+
+| 观察到 | 判定 |
+| --- | --- |
+| `start` → `summary` → `end`（无 `error`） | 成功，`count + 1` |
+| `start` → `end`（有 `error`），无 `summary` | **失败**，`failedCount + 1`，`count` 不变 |
+| `start` 有了、`end` 还没写 | **进行中**，两边都不加（不能提前宣称"压过了"） |
+| `summary`/`end` 没有配对的 `start` | 事件名漂移或日志截断 → 降级，不报次数（见 §3.2） |
+
+失败不是小事：**那次压缩没有生效，上下文没被压下去，还会继续涨**，而官方界面
+完全不体现这一点。所以只要 `failedCount > 0`：
+
+- 横幅即使占用没到 `warnPct`，圆点也会换成警告色，并写明"压缩失败 N 次"；
+- 提醒正文补一句"另有 N 次压缩失败（摘要没生成出来，那几次压缩没有生效）"；
+- `/ctxalert status` 显示 `未成功压缩过/压缩失败N次`；
+- `GET /api/context-alert/state` 每行带 `failedCount` 字段。
 
 ---
 
@@ -237,7 +263,7 @@ node verify-install.mjs
 
 | 占用 | 形态 | 内容 |
 | --- | --- | --- |
-| 低于 `warnPct` | **一行小字**，灰点、灰边框 | `已压缩 2 次　·　信息丢失率 52.2%`；从未压缩时是 `尚未发生上下文压缩　·　信息丢失率 0%`；拿不到宿主状态时是 `压缩次数未知`。**刻意不含百分比与 token 用量**——那两项归官方 `ContextMeter`（见 §1.1），重复显示只会让人怀疑哪个准 |
+| 低于 `warnPct` | **一行小字**，灰点、灰边框 | `已压缩 2 次　·　信息丢失率 52.2%`；从未压缩时是 `尚未发生上下文压缩　·　信息丢失率 0%`；拿不到宿主状态时是 `压缩次数未知`；**有压缩失败时**多一段 `压缩失败 N 次` 并把圆点换成警告色（即使占用很低）。**刻意不含百分比与 token 用量**——那两项归官方 `ContextMeter`（见 §1.1），重复显示只会让人怀疑哪个准 |
 | 高于 `warnPct` | **多行**，黄/红边框 | 标题是"即将开始本对话的第 N 次自动压缩"，下面是累计遮蔽量、丢失率、最近一次压缩的回合与 token 数 |
 
 ### 「信息丢失率」的口径（务必看清再引用）
@@ -280,7 +306,7 @@ node verify-install.mjs
 
 **已验证**
 
-- `watch.js` 纯逻辑：单测覆盖占用率口径、磁滞、冷却、升级绕冷却、每会话上限、压缩后重新上膛、缺失字段不编数字，以及压缩历史（数 `start` 而非 `prune`、事件名漂移时降级、序号措辞、文案不出现"距压缩线还有 N"）。
+- `watch.js` 纯逻辑：单测覆盖占用率口径、磁滞、冷却、升级绕冷却、每会话上限、压缩后重新上膛、缺失字段不编数字，以及压缩历史（成功以 `end` 结算而非在 `start` 上 +1、失败单独计 `failedCount`、进行中不提前计数、`prune` 不算压缩、事件名漂移时降级、序号措辞、文案不出现"距压缩线还有 N"）。
 - `index.js` 宿主半边：集成测试用假 ctx 跑真实 `apply()`，覆盖钩子注册、压力喂入、`userDriven` 过滤、回合结束触发、`session/disposed` 清理、命令各分支、三个 HTTP 路由、缺 `sessionProjections` 时优雅降级，以及压缩历史的整条接线（`snapshotEvents` → 序号 → 标题；读不到日志时降级并告警）。
 - `client.js` 客户端半边：**真的把 bundle 加载起来**（假 `ModuleLoader`），断言模块 id、两个 slot 的注册、dock 注册带 `inject(sessionId)`，并**冒烟调用**两个组件。
 - **压缩计数对着真实日志验证过**：拿本机 8 个真实会话日志跑 `compactionHistory()`，压缩次数与独立计数的 `compaction/start` 个数 **8/8 一致**（其中 5 个会话压缩过，最多的压过 3 次）。同一套数据也用于渲染真实文案预览。
@@ -288,7 +314,7 @@ node verify-install.mjs
 - `alert.ps1`：真机跑通 `toast`（气泡确实弹出）、`probe`、缺 payload 时报错退出。
 - 全部 JS `node --check` 通过；三个 JSON 校验通过；`alert.ps1` 纯 ASCII 校验通过。
 
-> 测试总数：75 项（`node run-tests.mjs`）。测试通过 `run-tests.mjs` 在进程内导入，因为本会话沙箱下 `node --test` 会因管道 stdio 报 EPERM。
+> 测试总数：81 项（`node run-tests.mjs`）。测试通过 `run-tests.mjs` 在进程内导入，因为本会话沙箱下 `node --test` 会因管道 stdio 报 EPERM。
 >
 > 客户端那组"冒烟调用"**不是视觉验证**，它的价值在于抓一类特定的 bug：组件里引用了不存在的标识符。这类 bug 在真机上表现为**整个 slot 条目被清空**（控制台 `slot entry crashed`），而 `node --check` 抓不到（它是语法检查，不是作用域检查）。这个守卫本身做过变异测试：注入一个未定义变量后，2 项用例如期失败，还原后全过。
 
@@ -350,7 +376,7 @@ node tools/scan-compactions.mjs 8
 - **提示音只读自己的目录**：原实现会去读 `dsh-plugin-notify` 的 `~/.dsh/notify/sounds/`，虽然那只是"存在就读、不存在就回落"的可选路径，但它让"本插件依赖别的插件"这个说法始终站得住脚。现在读 `~/.dsh/context-alert/sounds/`（跟随 `DSH_CTX_ALERT_HOME`），卸载/挪走任何别的插件都不影响这里。
 - **横幅不重复官方环的读数**：官方 `ContextMeter` 的环就渲染在输入栏 dock 内、本横幅**正下方**。所以平时那一行只报"压过几次 + 丢失率"，百分比与 token 用量留给官方环；只有越阈值时才把百分比拿到标题旁边——那时它已经是"该换会话了"这个判断的一部分，而不是顺便报个数。宁可横幅信息少一点，也不要两个相邻读数打架。
 - **不写"距离压缩线还有 N tokens"**：触发点里的 `O`（生效请求输出上限）在插件侧读不到，算出来的数会系统性偏乐观（因为取的是 `min`）。宁可只说上界，也不给一个看着精确的错数。详见 §3.1。
-- **压缩次数从日志数，不靠推断**：`compaction/start` 是唯一可靠依据；`compaction/prune` 看着像但不是压缩。并且加了一道"看到 summary/end 却没有 start 就降级"的自检，防止 DSH 改事件名后静默说错次数。
+- **压缩次数从日志数，不靠推断**：一对 `compaction/start` + `compaction/end` 是一次压缩，计数在 `end` 上结算；`end` 带 `error` 说明这次失败（不发 summary），单独记 `failedCount`，不算成功；`compaction/prune` 看着像但不是压缩。另外加了一道"看到 summary/end 却没有 start 就降级"的自检，防止 DSH 改事件名后静默说错次数。
 - **一次全量读日志，之后增量**：`snapshotEvents()` 是 O(n)，但每个会话只在**第一次真要提醒时**读一次（`collect()` 里也读一次以便横幅显示），之后靠 `session/event` 累加。既不违反"别反复重扫日志"，也不为永不提醒的会话付成本。子代理会话（没有 `userDriven` 标记）连这一次都不扫。
 - **客户端不改文本口径，只显示宿主给的序号**：序号措辞在 `watch.js` 里定义一次，宿主算好塞进 state 接口，客户端直接显示。避免"通知里说第三次、横幅说第二次"这类漂移。
 - **改客户端后必须重启 DSH 才看得到全部效果吗？不是**——但**宿主**改动必须重启。客户端 bundle 随页面刷新就会重新加载，宿主 `index.js` 只在启动时加载一次。这个区别真实造成过一次误判：当时看到的界面是"新版客户端 + 旧版宿主"，横幅因为接口里没有 `ordinalText` 而退回兜底文案。

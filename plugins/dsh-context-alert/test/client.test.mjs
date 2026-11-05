@@ -189,6 +189,46 @@ test('横幅常驻：压过 2 次时，平时一行里带次数与丢失率', ()
   } finally { plugin.__test__.clear() }
 })
 
+test('横幅常驻：有压缩失败时，低占用也要把失败次数说出来', () => {
+  const { plugin } = loadBundle()
+  const h = makeCtx()
+  plugin.apply(h.ctx)
+  h.boot()
+  const dock = h.registered.find((r) => r.descriptor.name === 'conversation.input.dock')
+
+  // 一次成功 + 一次失败：失败那次没有生效，上下文没被压下去。
+  plugin.__test__.setStateCache({ at: Date.now(), rows: [{
+    id: 's', compactionKnown: true, compactionCount: 1, failedCount: 1,
+    shadowedTotal: 74314, lossPct: 32.6, lastShadowedTokens: 74314, lastTurn: 3,
+  }] })
+  try {
+    const low = { sessionId: 's', t: (k) => k, useProjection: () => ({ contextWindow: 262144, projectedTokens: 32500 }) }
+    const text = textOf(dock.component(low)).join('')
+    assert.match(text, /已压缩 1 次/, '成功次数照报')
+    assert.match(text, /压缩失败 1 次/, '失败次数必须出现在平时那一行里')
+  } finally { plugin.__test__.clear() }
+})
+
+test('横幅常驻：只有失败的压缩时说"尚未成功压缩"，不说"尚未发生"', () => {
+  const { plugin } = loadBundle()
+  const h = makeCtx()
+  plugin.apply(h.ctx)
+  h.boot()
+  const dock = h.registered.find((r) => r.descriptor.name === 'conversation.input.dock')
+
+  plugin.__test__.setStateCache({ at: Date.now(), rows: [{
+    id: 's', compactionKnown: true, compactionCount: 0, failedCount: 2,
+    shadowedTotal: 0, lossPct: 0, lastShadowedTokens: null, lastTurn: null,
+  }] })
+  try {
+    const low = { sessionId: 's', t: (k) => k, useProjection: () => ({ contextWindow: 262144, projectedTokens: 32500 }) }
+    const text = textOf(dock.component(low)).join('')
+    assert.match(text, /尚未成功压缩/, '压过但全失败，不能说"尚未发生"')
+    assert.match(text, /压缩失败 2 次/)
+    assert.doesNotMatch(text, /尚未发生上下文压缩/, '两者语义不同，不能混')
+  } finally { plugin.__test__.clear() }
+})
+
 test('横幅常驻：从未压缩时说"尚未发生"，且丢失率为 0 也要说', () => {
   const { plugin } = loadBundle()
   const h = makeCtx()

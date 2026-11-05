@@ -171,7 +171,6 @@ window.__ModuleLoader__.load({
 
       const warn = pct >= c.warnPct;
       const critical = pct >= c.criticalPct;
-      const accent = critical ? T('state-error-primary') : warn ? T('state-warn-primary') : T('label-tertiary');
       const used = pressure && typeof pressure.projectedTokens === 'number' ? pressure.projectedTokens
         : pressure && typeof pressure.pressureTokens === 'number' ? pressure.pressureTokens : null;
 
@@ -179,9 +178,14 @@ window.__ModuleLoader__.load({
       const nth = row && typeof row.ordinalText === 'string' ? row.ordinalText : null;
       const count = row && typeof row.compactionCount === 'number' ? row.compactionCount : null;
       const known = !!(row && row.compactionKnown === true);
+      const failed = row && typeof row.failedCount === 'number' && row.failedCount > 0 ? row.failedCount : 0;
       const loss = row && typeof row.lossPct === 'number' ? row.lossPct : null;
       const shadowed = row ? fmtNum(row.shadowedTotal) : null;
       const usage = used !== null && win !== null ? fmtNum(used) + ' / ' + fmtNum(win) + ' tokens' : null;
+
+      // 压缩失败是**独立于占用率**的坏信号：官方界面完全不体现，但它意味着
+      // 上下文没被压下去、还会继续涨。所以占用没到阈值时也要用警告色说出来。
+      const accent = critical ? T('state-error-primary') : (warn || failed > 0) ? T('state-warn-primary') : T('label-tertiary');
 
       // ── 平时：一行小字，只回答官方环回答不了的两个问题 ────────────────
       // 「压过几次」「丢了多少」。占用率与 token 用量**故意不在这里重复**：
@@ -191,10 +195,12 @@ window.__ModuleLoader__.load({
       if (!warn) {
         const bits = [];
         if (known && count !== null) {
-          bits.push(count === 0 ? '尚未发生上下文压缩' : `已压缩 ${count} 次`);
+          if (count === 0) bits.push(failed > 0 ? '尚未成功压缩' : '尚未发生上下文压缩');
+          else bits.push(`已压缩 ${count} 次`);
         } else {
           bits.push('压缩次数未知');
         }
+        if (failed > 0) bits.push(`压缩失败 ${failed} 次`);
         if (loss !== null) bits.push(`信息丢失率 ${loss}%`);
         return h('div', { style: Object.assign({}, styles.banner, { border: '1px solid ' + T('border-l2') }) },
           h('span', { style: Object.assign({}, styles.dot, { background: accent }) }),
@@ -215,6 +221,7 @@ window.__ModuleLoader__.load({
       let historyLine;
       if (known && count !== null && count > 0) {
         const parts = [`已压缩 ${count} 次`];
+        if (failed > 0) parts.push(`失败 ${failed} 次`);
         if (shadowed !== null && row.shadowedTotal > 0) parts.push(`累计遮蔽 ${shadowed} tokens`);
         if (loss !== null) parts.push(`丢失率 ${loss}%`);
         historyLine = parts.join('　·　');
@@ -222,7 +229,9 @@ window.__ModuleLoader__.load({
           historyLine += `　最近一次${lastTurn === null ? '' : `（第 ${lastTurn} 回合）`}遮蔽 ${lastTokens} tokens，只留下摘要。`;
         }
       } else if (known && count === 0) {
-        historyLine = '本对话还没有压缩过，信息都还在。';
+        historyLine = failed > 0
+          ? `本对话的 ${failed} 次压缩都没成功，信息还都在。`
+          : '本对话还没有压缩过，信息都还在。';
       } else {
         historyLine = '压缩会把最旧的对话换成一条摘要消息，原始细节之后找不回来。';
       }

@@ -342,6 +342,31 @@ test('会话日志里有两次压缩 → 提醒说"第三次"', async () => {
   assert.match(f[0][1], /另有 2,118 tokens 的工具输出被修剪/, '修剪单独说')
 })
 
+test('日志里有失败压缩 → 不计入次数，并在提醒里说明', async () => {
+  // 失败路径：start → end{ error }，且没有 summary（dsh-compaction-basic 0.2.2-rc.1）。
+  // 一次成功 + 一次失败 → 下一次压缩仍然是"第二次"，不是"第三次"。
+  const session = {
+    id: 'sess-f',
+    snapshotEvents: () => [
+      C_START(3), C_SUMMARY(74314), C_END(3),
+      { type: 'compaction/start', seq: 4, time: 1400, data: { compactionId: 'b', turn: 5 } },
+      { type: 'compaction/end', seq: 5, time: 1500, data: { compactionId: 'b', turn: 5, error: 'boom' } },
+    ],
+  }
+  const h = makeCtx({ sessions: [session], pressure: { 'sess-f': stateAt(70) } })
+  apply(h.ctx)
+  await configure(h, BASE_CFG)
+  h.emit('agent/inbox/inserted', { agent: { id: 'sess-f', session } })
+  h.emit('session/event', session, { kind: 'x' })
+  h.emit('agent/turn-stopping', { agent: { id: 'sess-f', session }, turn: 12 })
+  await flush()
+
+  const f = fired(h)
+  assert.equal(f.length, 1)
+  assert.match(f[0][1], /第二次自动压缩/, '失败那次不算成功，序数不能跳到第三次')
+  assert.match(f[0][1], /另有 1 次压缩失败/, '失败要在提醒里说明')
+})
+
 test('会话没压缩过 → 提醒说"第一次"', async () => {
   const session = { id: 'sess-d', snapshotEvents: () => [{ type: 'tool/call' }] }
   const h = makeCtx({ sessions: [session], pressure: { 'sess-d': stateAt(70) } })

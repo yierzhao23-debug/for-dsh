@@ -356,6 +356,7 @@ export function apply (ctx) {
         pending: rec?.pending ?? 'ok',
         notifyCount: rec?.notifyCount ?? 0,
         compactionCount: comp?.count ?? rec?.compactionCount ?? 0,
+        failedCount: comp?.failedCount ?? rec?.compactionFailed ?? 0,
         compactionKnown: known,
         shadowedTotal,
         prunedTotal: comp?.prunedTotal ?? rec?.prunedTotal ?? 0,
@@ -384,6 +385,7 @@ export function apply (ctx) {
         pending: rec.pending,
         notifyCount: rec.notifyCount,
         compactionCount: rec.compactionCount,
+        failedCount: rec.compactionFailed ?? 0,
         compactionKnown: rec.compactionKnown,
         shadowedTotal: rec.shadowedTotal ?? 0,
         prunedTotal: rec.prunedTotal ?? 0,
@@ -420,10 +422,12 @@ export function apply (ctx) {
             const tag = r.userDriven ? '' : '（非用户会话，不提醒）'
             const armed = r.pending === 'ok' ? '' : ` 待发:${r.pending}`
             const stale = r.stale ? '（已结束）' : ''
+            const failNote = (r.failedCount ?? 0) > 0 ? `/压缩失败${r.failedCount}次` : ''
             const comp = r.compactionKnown
               ? (r.compactionCount === 0
-                  ? '  未压缩过'
+                  ? (failNote === '' ? '  未压缩过' : `  未成功压缩过${failNote}`)
                   : `  已压缩${r.compactionCount}次`
+                    + failNote
                     + `/累计遮蔽${fmtTokens(r.shadowedTotal)}`
                     + (r.lossPct === null ? '' : `/丢失率${r.lossPct}%`)
                     + (r.prunedTotal > 0 ? `/修剪${fmtTokens(r.prunedTotal)}` : ''))
