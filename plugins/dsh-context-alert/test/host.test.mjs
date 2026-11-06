@@ -25,7 +25,7 @@ const stateAt = (pct) => ({ contextWindow: WIN, pressureTokens: Math.round((WIN 
 function makeCtx ({ sessions = [], pressure = {} } = {}) {
   const handlers = new Map()
   const logs = []
-  const registered = { commands: [], routes: [] }
+  const registered = { commands: [], routes: [], effects: [] }
   const services = {
     sessionProjections: {
       stateOf: (session, key) => (key === 'contextPressure' ? pressure[session?.id] ?? null : null),
@@ -51,8 +51,35 @@ function makeCtx ({ sessions = [], pressure = {} } = {}) {
       const dispose = cb(child)
       return { dispose: typeof dispose === 'function' ? dispose : () => {} }
     },
+    /**
+     * cordis 的 ctx.effect(setup, label)：立刻执行 setup()，把它返回的 disposer
+     * 收进本插件的清理列表，卸载时统一调用。测试里实现同样语义，
+     * 才能验证"路由真的登记成可回收的 effect"。
+     */
+    effect (setup, label) {
+      const dispose = setup()
+      const off = typeof dispose === 'function' ? dispose : () => {}
+      registered.effects.push({ label, dispose: off })
+      return off
+    },
     commands: { register: (d) => registered.commands.push(d) },
-    webServer: { register: (d) => registered.routes.push(d) },
+    webServer: {
+      /**
+       * 与 dsh-host-webserver 的 register 同语义：重复 (kind, path) 直接抛
+       * `webserver: duplicate …`，成功时返回移除该路由的 disposer。
+       * 这条重复检查正是"关掉再打开"失败的原因，所以假实现必须照抄。
+       */
+      register (route) {
+        if (registered.routes.some((r) => r.kind === route.kind && r.path === route.path)) {
+          throw new Error(`webserver: duplicate ${route.kind} route "${route.path}"`)
+        }
+        registered.routes.push(route)
+        return () => {
+          const i = registered.routes.indexOf(route)
+          if (i >= 0) registered.routes.splice(i, 1)
+        }
+      },
+    },
   }
   const emit = (event, ...args) => {
     for (const fn of handlers.get(event) ?? []) fn(...args)
@@ -88,6 +115,27 @@ test('注册了 /ctxalert 命令与三个 HTTP 路由', () => {
     h.registered.routes.map((r) => r.path).sort(),
     ['/api/context-alert/settings', '/api/context-alert/state', '/api/context-alert/test'],
   )
+})
+
+test('关掉再打开（HMR 热重载）不会因重复路由失败', () => {
+  // 回归测试：webServer.register() 只是返回 disposer、**不会**随插件卸载自动回收，
+  // 且重复 (kind, path) 会直接抛 `webserver: duplicate exact route "…"`。
+  // 裸调用的话冷启动没事，但插件管理页里"关掉再打开"走的是热重载，
+  // 新 entry 的 apply() 会在旧路由还在表里时执行 → 抛错 → 整次启用失败（界面显示"异常"）。
+  // 所以三条路由都必须用 ctx.effect 登记。
+  const h = makeCtx()
+  apply(h.ctx)
+  assert.equal(h.registered.routes.length, 3, '三条路由')
+  assert.equal(h.registered.effects.length, 3, '三条路由都必须登记成可回收的 effect')
+
+  // 卸载：cordis 会把 effect 的 disposer 全跑一遍
+  for (const e of h.registered.effects) e.dispose()
+  assert.equal(h.registered.routes.length, 0, '卸载后路由表必须清空')
+
+  // 重新 apply 同一个 ctx：旧路由已回收，不应抛
+  h.registered.effects.length = 0
+  assert.doesNotThrow(() => apply(h.ctx), '热重载不能因 duplicate route 失败')
+  assert.equal(h.registered.routes.length, 3, '重载后路由重新就位')
 })
 
 test('压力越过阈值 + 回合结束 → 真的触发一次提醒', async () => {

@@ -7,7 +7,7 @@
 ![license](https://img.shields.io/badge/license-MIT-blue.svg)
 ![platform](https://img.shields.io/badge/platform-Windows-0078d4.svg)
 ![dsh](https://img.shields.io/badge/dsh-0.2.2--rc.1-4b6bfb.svg)
-![tests](https://img.shields.io/badge/tests-81%20passing-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-82%20passing-brightgreen.svg)
 
 ---
 
@@ -219,7 +219,8 @@ The closest neighbour is actually official rather than third-party: the **`Conte
 
 - `watch.js` pure logic: occupancy formula, hysteresis, cooldown, escalation bypassing cooldown, per-session cap, re-arm after compaction, never inventing a number from missing fields, and the compaction history (success settles on `end` rather than on `start`, failures counted separately as `failedCount`, in-flight compactions not counted early, `prune` excluded, degradation on event-name drift, ordinal wording).
 - `index.js` host half: runs the real `apply()` against a fake ctx, covering hook registration, pressure feeding, `userDriven` filtering, end-of-turn triggering, `session/disposed` cleanup, every command branch, the three HTTP routes, and graceful degradation when `sessionProjections` is absent.
-- Full suite: **81 passed, 0 failed** (Node 24.21.0, `node run-tests.mjs`).
+- **Routes are disposed on unload (0.2.2 fix).** `webServer.register()` only stores the route in a map and returns a disposer — it does not dispose with the plugin, and a duplicate `(kind, path)` throws `webserver: duplicate exact route "…"`. Calling it bare works on a cold start (each path registers once) but fails on a live re-apply: toggling the plugin off and on in the plugin manager goes through HMR, so the new entry's `apply()` runs while the old routes are still registered, throws, and the whole enable operation fails — the plugin manager then shows the plugin as **Problem/异常**. All three routes are now registered through `ctx.effect(() => ctx.webServer.register(...), 'context-alert: <path>')`, and a regression test simulates "dispose, then apply again".
+- Full suite: **82 passed, 0 failed** (Node 24.21.0, `node run-tests.mjs`).
 - `alert.ps1`: `toast` (the balloon really appears), `probe`, and a clean error exit on a missing payload, all exercised on the author's machine.
 - Every JS file passes `node --check`; the three JSON files validate; `alert.ps1` passes the pure-ASCII check.
 

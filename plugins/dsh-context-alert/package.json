@@ -1,6 +1,6 @@
 {
   "name": "dsh-context-alert",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "上下文压力提醒：读取官方 contextPressure 投影，在会话该换的时候于回合结束主动提醒你开新会话。",
   "type": "module",

@@ -506,7 +506,16 @@ export function apply (ctx) {
   })
 
   // ── HTTP：状态 / 设置 / 测试（客户端设置面板用）──────────────────────────
-  ctx.webServer.register({
+  //
+  // 三个路由**必须**用 ctx.effect 包起来。原因（0.2.2-rc.1 源码实测）：
+  //   dsh-host-webserver 的 register() 只是 `table.set(path, route)` 并
+  //   **返回一个 disposer**，它自己不会随插件卸载回收；而它遇到重复的
+  //   (kind, path) 会直接 `throw new Error('webserver: duplicate exact route "…"')`。
+  // 裸调用的话冷启动没事（每个路径只注册一次），但在插件管理页里"关掉再打开"
+  // 走的是 HMR 热重载：新 entry 的 apply() 在旧路由仍留在表里时执行 → 抛错 →
+  // 整次启用失败（界面显示"异常"，日志里是 operation-error）。
+  // 官方插件（如 dsh-client-connection）同样是 effect 包 register 的写法。
+  ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: '/api/context-alert/state',
     handler: (req, res) => {
@@ -521,9 +530,9 @@ export function apply (ctx) {
         sendJson(res, 500, { ok: false, error: e.message })
       }
     },
-  })
+  }), 'context-alert: /api/context-alert/state')
 
-  ctx.webServer.register({
+  ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: '/api/context-alert/settings',
     handler: async (req, res) => {
@@ -545,9 +554,9 @@ export function apply (ctx) {
         sendJson(res, 500, { ok: false, error: e.message })
       }
     },
-  })
+  }), 'context-alert: /api/context-alert/settings')
 
-  ctx.webServer.register({
+  ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: '/api/context-alert/test',
     handler: async (req, res) => {
@@ -561,5 +570,5 @@ export function apply (ctx) {
         sendJson(res, 500, { ok: false, error: e.message })
       }
     },
-  })
+  }), 'context-alert: /api/context-alert/test')
 }

@@ -314,7 +314,7 @@ node verify-install.mjs
 - `alert.ps1`：真机跑通 `toast`（气泡确实弹出）、`probe`、缺 payload 时报错退出。
 - 全部 JS `node --check` 通过；三个 JSON 校验通过；`alert.ps1` 纯 ASCII 校验通过。
 
-> 测试总数：81 项（`node run-tests.mjs`）。测试通过 `run-tests.mjs` 在进程内导入，因为本会话沙箱下 `node --test` 会因管道 stdio 报 EPERM。
+> 测试总数：82 项（`node run-tests.mjs`）。测试通过 `run-tests.mjs` 在进程内导入，因为本会话沙箱下 `node --test` 会因管道 stdio 报 EPERM。
 >
 > 客户端那组"冒烟调用"**不是视觉验证**，它的价值在于抓一类特定的 bug：组件里引用了不存在的标识符。这类 bug 在真机上表现为**整个 slot 条目被清空**（控制台 `slot entry crashed`），而 `node --check` 抓不到（它是语法检查，不是作用域检查）。这个守卫本身做过变异测试：注入一个未定义变量后，2 项用例如期失败，还原后全过。
 
@@ -376,6 +376,7 @@ node tools/scan-compactions.mjs 8
 - **提示音只读自己的目录**：原实现会去读 `dsh-plugin-notify` 的 `~/.dsh/notify/sounds/`，虽然那只是"存在就读、不存在就回落"的可选路径，但它让"本插件依赖别的插件"这个说法始终站得住脚。现在读 `~/.dsh/context-alert/sounds/`（跟随 `DSH_CTX_ALERT_HOME`），卸载/挪走任何别的插件都不影响这里。
 - **横幅不重复官方环的读数**：官方 `ContextMeter` 的环就渲染在输入栏 dock 内、本横幅**正下方**。所以平时那一行只报"压过几次 + 丢失率"，百分比与 token 用量留给官方环；只有越阈值时才把百分比拿到标题旁边——那时它已经是"该换会话了"这个判断的一部分，而不是顺便报个数。宁可横幅信息少一点，也不要两个相邻读数打架。
 - **不写"距离压缩线还有 N tokens"**：触发点里的 `O`（生效请求输出上限）在插件侧读不到，算出来的数会系统性偏乐观（因为取的是 `min`）。宁可只说上界，也不给一个看着精确的错数。详见 §3.1。
+- **HTTP 路由必须用 `ctx.effect` 登记**（0.2.2 修）：`webServer.register()` 只把路由塞进一张 Map 并**返回一个 disposer**，它自己不会随插件卸载回收；而重复的 `(kind, path)` 会直接抛 `webserver: duplicate exact route "…"`。裸调用时冷启动没事（每个路径只注册一次），但在插件管理页里**"关掉再打开"**走的是 HMR 热重载——新 entry 的 `apply()` 在旧路由仍留在表里时执行 → 抛错 → 整次启用失败，界面显示**"异常"**。现在三条路由都写成 `ctx.effect(() => ctx.webServer.register(...), 'context-alert: <path>')`，并有回归测试模拟"卸载后再 apply"。
 - **压缩次数从日志数，不靠推断**：一对 `compaction/start` + `compaction/end` 是一次压缩，计数在 `end` 上结算；`end` 带 `error` 说明这次失败（不发 summary），单独记 `failedCount`，不算成功；`compaction/prune` 看着像但不是压缩。另外加了一道"看到 summary/end 却没有 start 就降级"的自检，防止 DSH 改事件名后静默说错次数。
 - **一次全量读日志，之后增量**：`snapshotEvents()` 是 O(n)，但每个会话只在**第一次真要提醒时**读一次（`collect()` 里也读一次以便横幅显示），之后靠 `session/event` 累加。既不违反"别反复重扫日志"，也不为永不提醒的会话付成本。子代理会话（没有 `userDriven` 标记）连这一次都不扫。
 - **客户端不改文本口径，只显示宿主给的序号**：序号措辞在 `watch.js` 里定义一次，宿主算好塞进 state 接口，客户端直接显示。避免"通知里说第三次、横幅说第二次"这类漂移。
