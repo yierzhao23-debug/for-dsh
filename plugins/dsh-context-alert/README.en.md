@@ -6,7 +6,7 @@
 
 ![license](https://img.shields.io/badge/license-MIT-blue.svg)
 ![platform](https://img.shields.io/badge/platform-Windows-0078d4.svg)
-![dsh](https://img.shields.io/badge/dsh-0.2.2--rc.1-4b6bfb.svg)
+![dsh](https://img.shields.io/badge/dsh-0.2.2--rc.3-4b6bfb.svg)
 ![tests](https://img.shields.io/badge/tests-82%20passing-brightgreen.svg)
 
 ---
@@ -16,7 +16,7 @@
 | Item | Requirement |
 | --- | --- |
 | OS | **Windows only** — the notification backend is PowerShell (`NotifyIcon` balloon + SAPI speech) |
-| DSH | `0.2.2-rc.1` (declared in `dsh.compatibility.dshReleases`; `0.2.0-rc.2` also declared compatible) |
+| DSH | `engines.dsh: ">=0.2.0-rc.1 <0.3.0-0"` — verified on `0.2.0-rc.1`, `0.2.2-rc.1` and `0.2.2-rc.3`. As of 0.2.2-rc.3 the runtime evaluates **`engines.dsh`** (a semver range) or `@deepseek-ai/dsh*` peers; the older `dsh.compatibility.dshReleases` map is no longer read by anything |
 | Node | `>= 22.5` |
 | Peer plugin | **Requires `dsh-token-meter`**, which registers the `contextPressure` projection. Without it the plugin still loads and says so explicitly instead of crashing |
 
@@ -81,7 +81,7 @@ Compaction history is read from the session log (`session.v4.jsonl.zstd`), not e
 | `summary`/`end` with no matching `start` | event-name drift or truncated log → degrade, report no ordinal |
 | `compaction/prune` | tool-result pruning, **not** a compaction — excluded |
 
-The failure path is documented in `dsh-compaction-basic` (0.2.2-rc.1): a failed close appends `compaction/end` with an `error` field and never appends `compaction/summary`. Counting on `start` would therefore treat a failed compaction as a successful one and inflate the ordinal. A failure matters because **that compaction did not take effect — the context was not pushed down and keeps growing**, which the official UI does not surface at all. When `failedCount > 0` the banner switches its dot to the warning colour and adds `压缩失败 N 次`, the alert body says so explicitly, and `/ctxalert status` reports it.
+The failure path is documented in `dsh-compaction-basic` (verified on 0.2.2-rc.1 and 0.2.2-rc.3): a failed close appends `compaction/end` with an `error` field and never appends `compaction/summary`. Counting on `start` would therefore treat a failed compaction as a successful one and inflate the ordinal. A failure matters because **that compaction did not take effect — the context was not pushed down and keeps growing**, which the official UI does not surface at all. When `failedCount > 0` the banner switches its dot to the warning colour and adds `压缩失败 N 次`, the alert body says so explicitly, and `/ctxalert status` reports it.
 
 ---
 

@@ -68,7 +68,7 @@ occupancy       = projectedTokens / contextWindow
 +1 就是"即将发生的这次是第几次"。
 
 事件形状（实测自本机 `~/.dsh/sessions/**/session.v4.jsonl.zstd`，
-并对照 `dsh-compaction-basic` 0.2.2-rc.1 的源码逐项确认）：
+并对照 `dsh-compaction-basic` 0.2.2-rc.1 / 0.2.2-rc.3 的源码逐项确认）：
 
 | 事件 | 关键字段 | 用途 |
 | --- | --- | --- |
@@ -122,7 +122,7 @@ floor(min(W × thresholdRatio, W − O − headroomTokens))
 
 可以用 `tools/scan-compactions.mjs` 自己核对（见 §11）。
 
-### 3.3 压缩失败也要说（对齐 0.2.2-rc.1）
+### 3.3 压缩失败也要说（对齐 0.2.2-rc.1 / rc.3，两版行为一致）
 
 `dsh-compaction-basic` 的失败路径是：写 `compaction/start`，摘要生成失败后再写一个
 **带 `error` 字段的 `compaction/end`，但不写 `compaction/summary`**。
@@ -376,6 +376,7 @@ node tools/scan-compactions.mjs 8
 - **提示音只读自己的目录**：原实现会去读 `dsh-plugin-notify` 的 `~/.dsh/notify/sounds/`，虽然那只是"存在就读、不存在就回落"的可选路径，但它让"本插件依赖别的插件"这个说法始终站得住脚。现在读 `~/.dsh/context-alert/sounds/`（跟随 `DSH_CTX_ALERT_HOME`），卸载/挪走任何别的插件都不影响这里。
 - **横幅不重复官方环的读数**：官方 `ContextMeter` 的环就渲染在输入栏 dock 内、本横幅**正下方**。所以平时那一行只报"压过几次 + 丢失率"，百分比与 token 用量留给官方环；只有越阈值时才把百分比拿到标题旁边——那时它已经是"该换会话了"这个判断的一部分，而不是顺便报个数。宁可横幅信息少一点，也不要两个相邻读数打架。
 - **不写"距离压缩线还有 N tokens"**：触发点里的 `O`（生效请求输出上限）在插件侧读不到，算出来的数会系统性偏乐观（因为取的是 `min`）。宁可只说上界，也不给一个看着精确的错数。详见 §3.1。
+- **DSH 版本用 `engines.dsh` 声明，不用 `dsh.compatibility.dshReleases`**（0.2.3 改）：从 0.2.2-rc.3 起，官方 `evaluatePluginCompatibility()` 只认 `engines.dsh`（semver 范围，存在时单独决定、同时忽略 peers）或 `@deepseek-ai/dsh*` 的 `peerDependencies`；旧的 `dsh.compatibility.dshReleases` 映射在 3812 个官方文件里 **0 次命中**，已彻底不读。**不声明 `engines.dsh` 的插件会被一律判为"兼容"**——既不拒绝也不提示，等于没声明。本插件现声明 `">=0.2.0-rc.1 <0.3.0-0"`：下界取实测过的 rc.1；上界写 `<0.3.0-0` 而不是 `<0.3.0`，因为 `includePrerelease: true` 下 `<0.3.0` 会把 `0.3.0-rc.1` 也放过去。
 - **HTTP 路由必须用 `ctx.effect` 登记**（0.2.2 修）：`webServer.register()` 只把路由塞进一张 Map 并**返回一个 disposer**，它自己不会随插件卸载回收；而重复的 `(kind, path)` 会直接抛 `webserver: duplicate exact route "…"`。裸调用时冷启动没事（每个路径只注册一次），但在插件管理页里**"关掉再打开"**走的是 HMR 热重载——新 entry 的 `apply()` 在旧路由仍留在表里时执行 → 抛错 → 整次启用失败，界面显示**"异常"**。现在三条路由都写成 `ctx.effect(() => ctx.webServer.register(...), 'context-alert: <path>')`，并有回归测试模拟"卸载后再 apply"。
 - **压缩次数从日志数，不靠推断**：一对 `compaction/start` + `compaction/end` 是一次压缩，计数在 `end` 上结算；`end` 带 `error` 说明这次失败（不发 summary），单独记 `failedCount`，不算成功；`compaction/prune` 看着像但不是压缩。另外加了一道"看到 summary/end 却没有 start 就降级"的自检，防止 DSH 改事件名后静默说错次数。
 - **一次全量读日志，之后增量**：`snapshotEvents()` 是 O(n)，但每个会话只在**第一次真要提醒时**读一次（`collect()` 里也读一次以便横幅显示），之后靠 `session/event` 累加。既不违反"别反复重扫日志"，也不为永不提醒的会话付成本。子代理会话（没有 `userDriven` 标记）连这一次都不扫。

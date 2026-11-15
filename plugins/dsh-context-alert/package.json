@@ -1,6 +1,6 @@
 {
   "name": "dsh-context-alert",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "description": "上下文压力提醒：读取官方 contextPressure 投影，在会话该换的时候于回合结束主动提醒你开新会话。",
   "type": "module",
@@ -34,7 +34,8 @@
   ],
   "license": "MIT",
   "engines": {
-    "node": ">=22.5"
+    "node": ">=22.5",
+    "dsh": ">=0.2.0-rc.1 <0.3.0-0"
   },
   "dsh": {
     "bundle": {
@@ -47,12 +48,6 @@
         "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-settings"
       ]
-    },
-    "compatibility": {
-      "dshReleases": {
-        "0.2.0-rc.2": "compatible",
-        "0.2.2-rc.1": "compatible"
-      }
     }
   }
 }

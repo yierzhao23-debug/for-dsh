@@ -88,6 +88,20 @@ if (pkgDir !== null) {
     bad('包内 package.json 可读', e.message)
   }
 
+  // ── 2.5 兼容性声明 ──────────────────────────────────────────────────────
+  //
+  // 0.2.2-rc.3 起，官方 evaluatePluginCompatibility() 只认 `engines.dsh`
+  //（semver 范围，存在时单独决定）或 `@deepseek-ai/dsh*` 的 peerDependencies；
+  // 旧的 `dsh.compatibility.dshReleases` 已彻底不读（3812 个官方文件 0 命中）。
+  // **不声明 `engines.dsh` 的插件会被一律判为"兼容"**——既不拒绝也不提示，
+  // 等于没声明。所以这两项都要核。
+  const dshRange = pkg.engines?.dsh
+  if (typeof dshRange === 'string' && dshRange.trim() !== '') ok('声明了 engines.dsh 兼容范围', dshRange)
+  else bad('声明了 engines.dsh 兼容范围', '缺少 engines.dsh —— 新版 DSH 会把没声明的插件一律判为兼容')
+
+  if (pkg.dsh?.compatibility?.dshReleases === undefined) ok('无残留的 dsh.compatibility.dshReleases')
+  else bad('无残留的 dsh.compatibility.dshReleases', '该字段已不再被任何官方代码读取，应删除')
+
   // ── 3. 宿主入口 + bundle patch ─────────────────────────────────────────
   const hostEntry = join(pkgDir, pkg.main ?? './index.js')
   if (existsSync(hostEntry)) ok('宿主入口存在', hostEntry)
